@@ -41,6 +41,7 @@
 #include <private/android_filesystem_config.h>
 #include "wifi.h"
 #include "ResponseCode.h"
+#include "cutils/properties.h"
 
 #include "SoftapController.h"
 #include <dirent.h>
@@ -53,7 +54,7 @@ using android::base::WriteStringToFile;
 #include "wpa_ctrl.h"
 #endif
 
-std:: string hostapd_unix_file(StringPrintf("/data/misc/wifi/hostapd/wlan0"));
+std:: string hostapd_unix_file(StringPrintf("/data/misc/wifi/hostapd/ap0"));
 #ifdef LIBWPA_CLIENT_EXISTS
 static const char HOSTAPD_DHCP_DIR[]    = "/data/misc/dhcp";
 #endif
@@ -252,6 +253,8 @@ bool SoftapController::isSoftapStarted() {
     return (mPid != 0);
 }
 
+#define USE_MTK_WLAN 1
+
 /*
  * Arguments:
  *  argv[2] - wlan interface
@@ -265,6 +268,12 @@ int SoftapController::setSoftap(int argc, char *argv[]) {
     int hidden = 0;
     int channel = AP_CHANNEL_DEFAULT;
 
+#ifdef USE_MTK_WLAN
+    char ap_channel[PROPERTY_VALUE_MAX] = {'\0'};
+    const char AP_CHANNEL_PROP_NAME[] = "wifi.tethering.channel";
+    char mode;
+#endif
+
     if (argc < 5) {
         ALOGE("Softap set is missing arguments. Please use:");
         ALOGE("softap <wlan iface> <SSID> <hidden/broadcast> <channel> <wpa2?-psk|open> <passphrase>");
@@ -275,11 +284,61 @@ int SoftapController::setSoftap(int argc, char *argv[]) {
         hidden = 1;
 
     if (argc >= 5) {
+#ifdef USE_MTK_WLAN
+        if (property_get(AP_CHANNEL_PROP_NAME, ap_channel, NULL)){
+            channel = atoi(ap_channel);
+        } else {
+            channel = atoi(argv[5]);
+        }
+
+        if (channel < 0) {
+            channel = AP_CHANNEL_DEFAULT;
+            mode = 'g';
+        } else if (channel >= 0 && channel <= 14) {
+            /* 2.4G channel, 0 will trigger MTK auto channel selection */
+            mode = 'g';
+        } else {
+            /* 5G channel */
+            mode = 'a';
+        }
+#else
         channel = atoi(argv[5]);
         if (channel <= 0)
             channel = AP_CHANNEL_DEFAULT;
+#endif
     }
 
+#ifdef USE_MTK_WLAN
+    /*
+     * Arguments:
+     *  argv[2] - wlan interface
+     *  argv[3] - SSID
+     *  argv[4] - Broadcast/Hidden
+     *  argv[5] - Channel
+     *  argv[6] - Security
+     *  argv[7] - Key
+     *  argv[8] - Channel width
+     *  argv[9] - Max connection
+     */
+    std::string wbuf;
+    if (argc > 9) {
+        wbuf = StringPrintf("interface=%s\ndriver=nl80211\nctrl_interface="
+            "/data/misc/wifi/hostapd\nssid=%s\nchannel=%d\nieee80211n=1\n"
+            "hw_mode=%c\nignore_broadcast_ssid=%d\nmax_num_sta=%d\n"
+            "eap_server=1\nwps_state=2\nconfig_methods=display physical_display push_button\n"
+            "device_name=AndroidAP\nmanufacturer=MediaTek Inc.\nmodel_name=MTK Wireless Model\n"
+            "model_number=66xx\nserial_number=1.0\ndevice_type=10-0050F204-5\nwowlan_triggers=disconnect\n",
+            "ap0", argv[3], channel, mode, hidden, atoi(argv[9]));
+    } else {
+        wbuf = StringPrintf("interface=%s\ndriver=nl80211\nctrl_interface="
+            "/data/misc/wifi/hostapd\nssid=%s\nchannel=%d\nieee80211n=1\n"
+            "hw_mode=%c\nignore_broadcast_ssid=%d\n"
+            "eap_server=1\nwps_state=2\nconfig_methods=display physical_display push_button\n"
+            "device_name=AndroidAP\nmanufacturer=MediaTek Inc.\nmodel_name=MTK Wireless Model\n"
+            "model_number=66xx\nserial_number=1.0\ndevice_type=10-0050F204-5\nwowlan_triggers=disconnect\n",
+            "ap0", argv[3], channel, mode, hidden);
+    }
+#else
     std::string wbuf(StringPrintf("interface=%s\n"
             "driver=nl80211\n"
             "ctrl_interface=/data/misc/wifi/hostapd\n"
@@ -290,6 +349,7 @@ int SoftapController::setSoftap(int argc, char *argv[]) {
             "ignore_broadcast_ssid=%d\n"
             "wowlan_triggers=any\n",
             argv[2], argv[3], channel, (channel <= 14) ? 'g' : 'a', hidden));
+#endif
 
     std::string fbuf;
     if (argc > 7) {
